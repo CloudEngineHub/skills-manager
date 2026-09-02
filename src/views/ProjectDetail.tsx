@@ -41,6 +41,8 @@ import type { ProjectSkill, ManagedSkill, ProjectAgentTarget } from "../lib/taur
 import { getErrorMessage } from "../lib/error";
 import { AddSkillsSheet } from "../components/AddSkillsSheet";
 
+const PROJECT_DEFAULT_EXPORT_AGENTS_KEY = "project_default_export_agents";
+
 const projectLastUsedAgentsKey = (projectId: string) =>
   `project_last_used_export_agents:${projectId}`;
 
@@ -129,6 +131,7 @@ export function ProjectDetail() {
   const { projects, presets, managedSkills, refreshManagedSkills, refreshPresets, refreshProjects } = useApp();
   const [skills, setSkills] = useState<ProjectSkill[]>([]);
   const [projectAgentTargets, setProjectAgentTargets] = useState<ProjectAgentTarget[]>([]);
+  const [selectedExportAgents, setSelectedExportAgents] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [filterMode, setFilterMode] = useState<"all" | "enabled" | "disabled">("all");
@@ -354,7 +357,18 @@ export function ProjectDetail() {
     [projectPresetVariants]
   );
 
-  const selectedExportAgents = useMemo(() => getDefaultExportAgents(exportTargets), [exportTargets]);
+  useEffect(() => {
+    let cancelled = false;
+    const loadDefaultExportAgents = async () => {
+      const savedValue = await api.getSettings(PROJECT_DEFAULT_EXPORT_AGENTS_KEY).catch(() => null);
+      if (cancelled) return;
+      setSelectedExportAgents(getDefaultExportAgents(exportTargets, savedValue));
+    };
+    loadDefaultExportAgents();
+    return () => {
+      cancelled = true;
+    };
+  }, [exportTargets]);
 
   const [lastUsedExportAgents, setLastUsedExportAgents] = useState<string[] | null>(null);
   useEffect(() => {
@@ -836,16 +850,10 @@ export function ProjectDetail() {
     [findProjectPresetVariant]
   );
 
-  // One call per skill, not per (skill, agent): the backend takes a list,
-  // validates every agent before writing anything, and de-dupes agents that
-  // resolve to the same project skills root. Calling it once per agent defeats
-  // that de-dup — the second agent of a shared-root pair (two adapters share
-  // `.agents/skills`, two share `.config/agents/skills`) hits the "already
-  // exists" guard and is reported as a spurious failure.
   const handleAddPresetSkillToProject = useCallback(
-    async (skill: ManagedSkill, agentKeys: string[]) => {
-      if (!id || agentKeys.length === 0) return;
-      await api.exportSkillToProject(skill.id, id, agentKeys);
+    async (skill: ManagedSkill, agentKey: string) => {
+      if (!id) return;
+      await api.exportSkillToProject(skill.id, id, [agentKey]);
     },
     [id]
   );
