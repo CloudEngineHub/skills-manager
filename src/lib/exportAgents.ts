@@ -9,23 +9,9 @@ export function enabledInstalledAgentKeys(targets: ProjectAgentTarget[]): string
   return targets.filter((target) => target.installed && target.enabled).map((target) => target.key);
 }
 
-export function getDefaultExportAgents(targets: ProjectAgentTarget[], savedValue?: string | null) {
+export function getDefaultExportAgents(targets: ProjectAgentTarget[]): string[] {
   const enabledKeys = enabledInstalledAgentKeys(targets);
   const availableKeys = new Set(enabledKeys);
-  if (savedValue) {
-    try {
-      const parsed = JSON.parse(savedValue);
-      if (Array.isArray(parsed)) {
-        const filtered = parsed.filter((item): item is string => typeof item === "string" && availableKeys.has(item));
-        if (filtered.length > 0) {
-          return Array.from(new Set(filtered));
-        }
-      }
-    } catch {
-      // Ignore invalid persisted settings and fall back to built-in defaults.
-    }
-  }
-
   // Priority agents first, then every other enabled agent in its detected
   // order. All enabled agents are included: preset export must reach each
   // one the user has installed and enabled (issue #400 — non-priority

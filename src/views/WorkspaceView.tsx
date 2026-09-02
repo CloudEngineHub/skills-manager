@@ -600,8 +600,12 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
     []
   );
 
-  const handlePresetAdd = useCallback(async (skill: ManagedSkill, agentK: string) => {
-    await api.syncSkillToTool(skill.id, agentK);
+  // The global workspace syncs one agent at a time; PresetBar hands over the
+  // whole target list so the project path can batch its single backend call.
+  const handlePresetAdd = useCallback(async (skill: ManagedSkill, agentKeys: string[]) => {
+    for (const agentK of agentKeys) {
+      await api.syncSkillToTool(skill.id, agentK);
+    }
   }, []);
 
   const handlePresetRemove = useCallback(async (skill: ManagedSkill, agentK: string) => {

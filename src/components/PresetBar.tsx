@@ -13,7 +13,7 @@ export interface PresetBarProps {
   managedSkills: ManagedSkill[];
   agentKeys: string[];
   existsInWorkspace: (skill: ManagedSkill, agentKey: string) => boolean;
-  onAddSkill: (skill: ManagedSkill, agentKey: string) => Promise<void>;
+  onAddSkill: (skill: ManagedSkill, agentKeys: string[]) => Promise<void>;
   onRemoveSkill: (skill: ManagedSkill, agentKey: string) => Promise<void>;
   onComplete: () => Promise<void>;
 }
@@ -50,11 +50,14 @@ export function PresetBar({
       let added = 0, skipped = 0, failed = 0;
       const failures: string[] = [];
       for (const skill of presetSkills) {
-        for (const agentKey of agentKeys) {
-          if (existsInWorkspace(skill, agentKey)) { skipped++; continue; }
-          try { await onAddSkill(skill, agentKey); added++; }
-          catch (e) { failed++; failures.push(getErrorMessage(e, t("common.error"))); }
-        }
+        const targets = agentKeys.filter((agentKey) => !existsInWorkspace(skill, agentKey));
+        skipped += agentKeys.length - targets.length;
+        if (targets.length === 0) continue;
+        // One call per skill, not per (skill, agent). Failure granularity is
+        // therefore per skill: the project backend writes all-or-nothing, so a
+        // failed call means none of `targets` was written.
+        try { await onAddSkill(skill, targets); added += targets.length; }
+        catch (e) { failed += targets.length; failures.push(getErrorMessage(e, t("common.error"))); }
       }
       if (added > 0) {
         toast.success(t("presetActions.addedToast", { added, skipped }));
