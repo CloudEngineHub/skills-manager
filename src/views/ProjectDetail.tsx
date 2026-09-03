@@ -40,9 +40,6 @@ import * as api from "../lib/tauri";
 import type { ProjectSkill, ManagedSkill, ProjectAgentTarget } from "../lib/tauri";
 import { getErrorMessage } from "../lib/error";
 import { AddSkillsSheet } from "../components/AddSkillsSheet";
-
-const PROJECT_DEFAULT_EXPORT_AGENTS_KEY = "project_default_export_agents";
-
 const projectLastUsedAgentsKey = (projectId: string) =>
   `project_last_used_export_agents:${projectId}`;
 
@@ -131,7 +128,6 @@ export function ProjectDetail() {
   const { projects, presets, managedSkills, refreshManagedSkills, refreshPresets, refreshProjects } = useApp();
   const [skills, setSkills] = useState<ProjectSkill[]>([]);
   const [projectAgentTargets, setProjectAgentTargets] = useState<ProjectAgentTarget[]>([]);
-  const [selectedExportAgents, setSelectedExportAgents] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [filterMode, setFilterMode] = useState<"all" | "enabled" | "disabled">("all");
@@ -357,18 +353,7 @@ export function ProjectDetail() {
     [projectPresetVariants]
   );
 
-  useEffect(() => {
-    let cancelled = false;
-    const loadDefaultExportAgents = async () => {
-      const savedValue = await api.getSettings(PROJECT_DEFAULT_EXPORT_AGENTS_KEY).catch(() => null);
-      if (cancelled) return;
-      setSelectedExportAgents(getDefaultExportAgents(exportTargets, savedValue));
-    };
-    loadDefaultExportAgents();
-    return () => {
-      cancelled = true;
-    };
-  }, [exportTargets]);
+  const selectedExportAgents = useMemo(() => getDefaultExportAgents(exportTargets), [exportTargets]);
 
   const [lastUsedExportAgents, setLastUsedExportAgents] = useState<string[] | null>(null);
   useEffect(() => {
@@ -420,9 +405,14 @@ export function ProjectDetail() {
   }, [exportTargets, lastUsedExportAgents, selectedExportAgents]);
 
   const presetBarAgentKeys = useMemo(() => {
+    // The real targets load asynchronously; until they arrive `exportTargets`
+    // stands in with a claude_code-only singleton. Applying a preset off that
+    // stand-in would deploy to Claude Code alone — the exact failure #400
+    // reported — so keep the bar out of the DOM until the targets are real.
+    if (projectAgentTargets.length === 0) return [];
     const availableKeys = new Set(enabledInstalledAgentKeys(exportTargets));
     return selectedExportAgents.filter((key) => availableKeys.has(key));
-  }, [exportTargets, selectedExportAgents]);
+  }, [exportTargets, projectAgentTargets, selectedExportAgents]);
 
   const enabledCount = groupedSkills.filter((s) => s.enabledCount > 0).length;
   const allTags = useMemo(() => {
