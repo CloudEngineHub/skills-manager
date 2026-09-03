@@ -5,6 +5,24 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.36.1] - 2026-09-03
+
+### 发布概览
+- 在项目里应用 preset 现在会覆盖你启用的每一个 agent；Windows 上装完首次启动也不再闪现控制台窗口。
+
+### 用户可见更新
+- **项目里的 preset 现在会同步到你所有的 agent** —— 此前在项目中应用 preset 只会部署到 Claude Code、Codex、Cursor、Gemini CLI 和 GitHub Copilot，而且最多只取其中三个。其余的 agent —— Pi、ZCode、DeepSeek Harness、Kimi 等等 —— 会被无声丢弃，这也正是「把 Claude Code 和 Codex 关掉，别的反而能同步了」的原因。优先级现在只决定顺序，所有已安装并启用的 agent 都会包含在内。感谢 @ZhuYichuan 定位问题并提交修复（#400、#403）。
+- **一项隐藏的旧设置不再窄化这个列表** —— 早期版本有过一个「保存默认 agent」的按钮，按钮后来被移除，它写下的设置却留了下来。如果你当年点过它，你的项目会一直只部署到那个被冻结的子集，而界面上既看不到它、也无法修改 —— 上面那条修复因此到不了你这里。升级时会清除这项残留设置。
+- **Preset 工具栏会等真实的 agent 列表就绪** —— 打开项目后，若在 agent 列表加载完成前就点击 preset，可能只部署到 Claude Code。现在要等真实列表到达后，该工具栏才会出现。
+- **Windows 上不再闪现控制台窗口** —— 负责发布内置命令行工具的辅助流程没有隐藏窗口，导致每次安装后的首次启动都会闪过一个黑色控制台（#413）。
+
+### 开发者与治理更新
+- `cli_bridge` 的 `--version` 校验改为经由一个统一设置 `CREATE_NO_WINDOW` 的构造器调用，该 flag 是这个 crate 里其他所有 spawn 早已在用的；构造器的命名也让此处将来新增的 spawn 有明确的去处。
+- 迁移 v7→v8 删除残留的 `project_default_export_agents` 行。它对「没有 settings 表」的数据库保持容错，不因一次清理而让升级失败；配套测试已通过变异验证——删掉 DELETE 语句时该测试必然变红。
+- `getDefaultExportAgents` 现在是项目 agent 目标的纯函数；`presetBarAgentKeys` 会在这些目标真正加载完成前按住工具栏，而不是从只含 claude_code 的占位列表推导。
+- 一项针对 preset 应用的批量化改动在发版前被撤回：跨厂商复核发现它会错报按 agent 的执行结果——后端只有校验阶段是全有全无，写入循环并不是。
+
+
 ## [1.36.0] - 2026-08-29
 
 ### 发布概览

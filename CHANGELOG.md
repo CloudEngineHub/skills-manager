@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.36.1] - 2026-09-03
+
+### Release Overview
+- Applying a preset in a project reaches every agent you have enabled, and the Windows installer no longer flashes a console window on the first launch after an install.
+
+### User-facing
+- **A project preset now reaches all of your agents** — Applying a preset inside a project only ever deployed to Claude Code, Codex, Cursor, Gemini CLI and GitHub Copilot, and to at most three of them. Every other agent — Pi, ZCode, DeepSeek Harness, Kimi, and the rest — was dropped without a word, which is why disabling Claude Code and Codex made the others start working. Priority now only decides the order; every installed and enabled agent is included. Thanks to @ZhuYichuan for the diagnosis and the fix (#400, #403).
+- **A stale hidden preference no longer narrows that list** — An older version had a "save default agents" button whose setting outlived the button. If you ever used it, your projects kept deploying to that frozen subset, with nothing in the interface to show it or change it — so the fix above would not have reached you. That leftover setting is now removed on upgrade.
+- **The preset bar waits for your real agent list** — Opening a project and clicking a preset before its agent list finished loading could deploy to Claude Code alone. The bar now appears once the real list has arrived.
+- **No more console window flashing on Windows** — The helper that publishes the bundled command-line tool ran without hiding its window, so a black console appeared and vanished on the first launch after every install (#413).
+
+### Developer & Governance
+- `cli_bridge` routes its `--version` verification through a constructor that sets `CREATE_NO_WINDOW`, the flag every other spawn in the crate already used. It is named so a future spawn here has somewhere obvious to go.
+- Migration v7→v8 deletes the orphaned `project_default_export_agents` row. It tolerates a database with no settings table rather than failing an upgrade over a cleanup, and is covered by a test verified to fail when the delete is removed.
+- `getDefaultExportAgents` is now a pure function of the project's agent targets, and `presetBarAgentKeys` holds the bar back until those targets have actually loaded rather than deriving from the claude_code-only stand-in.
+- A batching change to preset application was reverted before release: cross-vendor review found it misreported per-agent outcomes, since only the backend's validation pass is all-or-nothing while its write loop is not.
 ## [1.36.0] - 2026-08-29
 
 ### Release Overview
