@@ -5,6 +5,25 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.36.2] - 2026-09-05
+
+### 发布概览
+- 两项 git 来源修复：钉在 tag 上的 skill 不再永久检查失败；私有仓库的 skill 在桌面端可以正常使用。
+
+### 用户可见更新
+- 从 tag 安装的 skill（`.../tree/v1.2.3/...`）不再常驻「检查失败」。安装一直是接受 tag 的，但检查更新只按同名分支去找，找不到，所以重试多少次都不会好。
+- 私有仓库的 skill 现在可以在桌面端检查更新和安装。此前会报 libgit2 的原文「remote authentication required but no callback set」，而同样的 skill 用命令行却正常——因为应用没有给 git 提供取凭据的途径。现在依次从应用钥匙串、系统的 git 凭据助手（osxkeychain / Git Credential Manager / libsecret）、ssh-agent 获取。
+- 取不到凭据时，提示会说明是哪个主机需要登录，而不是抛出 libgit2 的错误码。
+- tag 来源不再每次检查更新都重新下载整个仓库。
+- 技能详情页的来源字段此前固定标为「分支」，即使值是 tag；现在显示「分支 / 标签」。
+
+### 开发者与治理更新
+- 两处 revision 解析改为跨 `refs/heads` 与 `refs/tags` 按完整 ref 名精确匹配，优先级为分支 → annotated tag 的 peeled commit → tag 对象。此前「取 ls-remote 输出的第一行」会拿到 annotated tag 的对象 sha，导致每次检查都误报有更新。
+- tree URL 消歧同时列出 tag，并放在第二轮匹配——分支优先，避免名为 `main/v1` 的 tag 抢走本该是分支 `main` 加子路径的 URL。
+- git2 的 clone 回退现在能检出 tag：初始化空仓库后直接浅取 tag ref，而不是先 clone 默认分支再多下一份快照。
+- `git_fetcher` 里**三处** git2 网络入口全部接入凭据回调，而不只是报告点名的那一处——另两处是 clone 路径，只修一处会导致私有来源「查得动、装不上」。钥匙串改为在回调内部读取，公开来源不再触碰钥匙串。
+- 备份引擎 `git2_engine` 保持不动：它有自己的凭据路径且已在生产运行，不因此缺陷去改动它。
+- 新增测试覆盖 ref 优先级、annotated 与 lightweight tag、分支优先的消歧规则，以及凭据回调。三个依赖网络的测试默认 ignored，其中一个会清空 PATH，用于验证无 git 机器上的回退链路。
 ## [1.36.1] - 2026-09-03
 
 ### 发布概览

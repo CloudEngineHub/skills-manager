@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.36.2] - 2026-09-05
+
+### Release Overview
+- Two git source fixes: a skill pinned to a tag no longer fails its update check forever, and skills hosted on a private repository work in the desktop app.
+
+### User-facing
+- A skill installed from a tag (`.../tree/v1.2.3/...`) no longer shows a permanent "check failed" badge. Installation always accepted a tag, but the update check looked for a branch of that name and never found one, so the failure could not be cleared by retrying.
+- Skills on a private repository can now be checked and installed from the desktop app. They previously failed with libgit2's own wording — "remote authentication required but no callback set" — while the same skills worked from the CLI, because the app never handed git a way to obtain credentials. Credentials now come from the app's keychain entry, your git credential helper (osxkeychain, Git Credential Manager, libsecret), or ssh-agent.
+- When no credentials are available, the message says which host needs a sign-in instead of quoting a libgit2 error code.
+- A tag source no longer re-downloads its repository on every update check.
+- The skill detail panel labelled the source ref "Branch" even when it held a tag; it now reads "Branch / Tag".
+
+### Developer & Governance
+- Both revision resolvers match refs by exact name across `refs/heads` and `refs/tags`, preferring a branch, then an annotated tag's peeled commit, then the tag object. Taking the first line of `ls-remote` output would have adopted an annotated tag's object sha and reported an update on every check.
+- Tree-URL disambiguation lists tags as well as heads, matched in a second pass so a tag cannot claim a URL a branch explains.
+- The git2 clone fallback can check out a tag: it inits an empty repository and shallow-fetches the tag ref, rather than cloning the default branch first.
+- All three git2 network entry points in `git_fetcher` install credentials, not just the one the bug report named — the two clone paths meant a private source could be diagnosed but not installed. The keychain is read from inside the callback, so a public source no longer touches it at all.
+- The backup engine (`git2_engine`) is deliberately untouched; it has its own credentials path already in production.
+- New tests cover ref ordering, annotated vs lightweight tags, branch-beats-tag disambiguation, and the credentials callback. Three network-dependent tests are ignored by default; one of them empties PATH to exercise the fallback on a machine with no git.
 ## [1.36.1] - 2026-09-03
 
 ### Release Overview
