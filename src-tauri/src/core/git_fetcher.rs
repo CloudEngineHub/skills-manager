@@ -1,4 +1,5 @@
 use crate::core::central_repo;
+use crate::core::git_credentials;
 use crate::core::skill_metadata;
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
@@ -570,6 +571,7 @@ pub fn clone_repo_ref_with_progress(
         true
     });
 
+    git_credentials::install_git2_credentials(&mut callbacks, url);
     let mut fetch_opts = git2::FetchOptions::new();
     fetch_opts.remote_callbacks(callbacks);
     fetch_opts.depth(1);
@@ -632,6 +634,7 @@ fn clone_tag_with_git2(
             }
             Instant::now() <= deadline
         });
+        git_credentials::install_git2_credentials(&mut callbacks, url);
         let mut opts = git2::FetchOptions::new();
         opts.remote_callbacks(callbacks);
         opts.depth(1);
@@ -692,7 +695,9 @@ pub fn resolve_remote_revision(
     if let Some(proxy) = proxy_url.filter(|s| !s.is_empty()) {
         proxy_opts.url(proxy);
     }
-    remote.connect_auth(Direction::Fetch, None, Some(proxy_opts))?;
+    let mut callbacks = git2::RemoteCallbacks::new();
+    git_credentials::install_git2_credentials(&mut callbacks, url);
+    remote.connect_auth(Direction::Fetch, Some(callbacks), Some(proxy_opts))?;
     let refs = remote.list()?;
 
     for wanted in candidate_ref_names(branch) {
