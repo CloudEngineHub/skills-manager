@@ -328,7 +328,7 @@
     "sourceType": "来源类型",
     "sourceRef": "来源位置",
     "sourceResolved": "解析后来源",
-    "sourceBranch": "分支",
+    "sourceBranch": "分支 / 标签",
     "sourceSubpath": "子路径",
     "sourceRevision": "版本",
     "docTabs": {

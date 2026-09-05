@@ -328,7 +328,7 @@
     "sourceType": "Source type",
     "sourceRef": "Source",
     "sourceResolved": "Resolved source",
-    "sourceBranch": "Branch",
+    "sourceBranch": "Branch / Tag",
     "sourceSubpath": "Subpath",
     "sourceRevision": "Revision",
     "docTabs": {
