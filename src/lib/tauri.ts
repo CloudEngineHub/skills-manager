@@ -705,8 +705,10 @@ export const gitBackupResolveConflict = (
 export const gitBackupClone = (url: string) =>
   invoke<void>("git_backup_clone", { url });
 
+/** Resolves to where the previous `.git` was kept when its history could
+ *  not be proven to be on the remote, otherwise `null`. */
 export const gitBackupReclone = (url: string) =>
-  invoke<void>("git_backup_reclone", { url });
+  invoke<string | null>("git_backup_reclone", { url });
 
 export const gitBackupCreateSnapshot = () =>
   invoke<string>("git_backup_create_snapshot");
