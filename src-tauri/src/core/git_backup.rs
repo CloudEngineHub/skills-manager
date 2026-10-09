@@ -928,7 +928,7 @@ pub(crate) fn restore_snapshot_version_unlocked(skills_dir: &Path, tag: &str) ->
 #[allow(dead_code)]
 pub fn clone_into(skills_dir: &Path, url: &str) -> Result<()> {
     let _lock = RepoLock::acquire_foreground("git clone")?;
-    clone_into_unlocked(skills_dir, url)
+    clone_into_unlocked(skills_dir, url, &[]).map(|_| ())
 }
 
 /// Clone variant that refuses to merge a populated non-git directory into the
@@ -942,7 +942,7 @@ pub fn clone_into(skills_dir: &Path, url: &str) -> Result<()> {
 pub fn clone_into_strict(skills_dir: &Path, url: &str) -> Result<()> {
     let _lock = RepoLock::acquire_foreground("git clone")?;
     ensure_clean_clone_target(skills_dir)?;
-    clone_into_unlocked(skills_dir, url)
+    clone_into_unlocked(skills_dir, url, &[]).map(|_| ())
 }
 
 /// Refuse a clone target that is a file, or a non-empty directory that is not
@@ -986,11 +986,12 @@ fn ensure_clean_clone_target(skills_dir: &Path) -> Result<()> {
 pub(crate) fn reclone_from_remote_unlocked(
     skills_dir: &Path,
     url: &str,
-) -> Result<Option<PathBuf>> {
+    set_aside: &[String],
+) -> Result<RecloneOutcome> {
     let git_dir = skills_dir.join(".git");
     if !git_dir.exists() {
-        clone_into_unlocked(skills_dir, url)?;
-        return Ok(None);
+        let local_copies = clone_into_unlocked(skills_dir, url, set_aside)?;
+        return Ok(RecloneOutcome { kept_git: None, local_copies });
     }
 
     log::info!("git reclone: re-cloning from remote, preserving local skills");
@@ -998,23 +999,24 @@ pub(crate) fn reclone_from_remote_unlocked(
     std::fs::rename(&git_dir, &git_backup)
         .context("Failed to move existing .git aside before re-clone")?;
 
-    match clone_into_unlocked(skills_dir, url) {
-        Ok(()) => {
-            if history_is_on_remote(&git_backup, skills_dir) {
+    match clone_into_unlocked(skills_dir, url, set_aside) {
+        Ok(local_copies) => {
+            let kept_git = if history_is_on_remote(&git_backup, skills_dir) {
                 if let Err(e) = std::fs::remove_dir_all(&git_backup) {
                     log::warn!(
                         "git reclone: could not remove {} (fully on the remote): {e}",
                         git_backup.display()
                     );
                 }
-                Ok(None)
+                None
             } else {
                 log::info!(
                     "git reclone: previous history not proven to be on the remote; kept at {}",
                     git_backup.display()
                 );
-                Ok(Some(git_backup))
-            }
+                Some(git_backup)
+            };
+            Ok(RecloneOutcome { kept_git, local_copies })
         }
         Err(e) => {
             // clone_into_unlocked has put the skill files back without a
@@ -1042,20 +1044,38 @@ pub(crate) fn reclone_from_remote_unlocked(
     }
 }
 
+/// What a successful re-clone left beside the library for the user.
+#[derive(Debug, Default)]
+pub(crate) struct RecloneOutcome {
+    /// The previous `.git`, when its history is not proven to be on the remote.
+    pub kept_git: Option<PathBuf>,
+    /// Local versions of skills that differed from the remote's, when the
+    /// caller confirmed setting them aside (see [`clone_into_unlocked`]).
+    pub local_copies: Option<PathBuf>,
+}
+
 /// Clone `url` into `skills_dir`, keeping any local content.
 ///
 /// A non-empty `skills_dir` is moved to a uniquely named sibling first (an
 /// earlier attempt's backup is never touched). Once the clone succeeds, local
-/// top-level entries the clone does not have are copied in; same-name entries
-/// must hold the same content (see [`diverging_entries`]), because the
-/// clone's copy is the one that stays.
+/// top-level entries the clone does not have are copied in. The clone's copy
+/// of a same-name entry is the one that stays, so ones that differ (see
+/// [`diverging_entries`]) stop the clone with `CLONE_LOCAL_DIFFERS`, naming
+/// them one per line — unless `set_aside` names exactly those entries, the
+/// list the user confirmed: their local versions are then copied to a new
+/// folder beside the library, which is returned.
 ///
 /// Rollback contract: on `Ok`, `skills_dir` is the clone plus the local-only
 /// entries and the backup is gone. On every `Err` — the clone failed, a local
-/// entry diverges (`CLONE_LOCAL_DIFFERS`), or copying local entries in failed
-/// — `skills_dir` is the original content again, with no `.git`, and no backup
-/// is left behind; if putting it back fails, the error says where it is.
-pub(crate) fn clone_into_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
+/// entry diverges, or copying local entries in or out failed — `skills_dir`
+/// is the original content again, with no `.git`, and neither a backup nor a
+/// set-aside folder is left behind; whatever cannot be put back or cleaned
+/// up, the error says where it is.
+pub(crate) fn clone_into_unlocked(
+    skills_dir: &Path,
+    url: &str,
+    set_aside: &[String],
+) -> Result<Option<PathBuf>> {
     if skills_dir.join(".git").exists() {
         anyhow::bail!("Skills directory is already a git repository");
     }
@@ -1117,7 +1137,7 @@ pub(crate) fn clone_into_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
         // a git repository".
         log::warn!("git clone: failed: {e:#}");
         return match backup_dir {
-            Some(backup) => put_back_pre_clone_library(skills_dir, &backup, e),
+            Some(backup) => put_back_pre_clone_library(skills_dir, &backup, e).map(|()| None),
             None => {
                 if skills_dir.join(".git").exists() {
                     let _ = std::fs::remove_dir_all(skills_dir);
@@ -1129,29 +1149,76 @@ pub(crate) fn clone_into_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
 
     let Some(backup) = backup_dir else {
         log::info!("git clone: done");
-        return Ok(());
+        return Ok(None);
     };
-    let merged = diverging_entries(&backup, skills_dir).and_then(|diverging| {
-        if !diverging.is_empty() {
-            anyhow::bail!(
-                "CLONE_LOCAL_DIFFERS: the clone was stopped and the local library left as it was, \
-                 because these local items differ from the remote backup's copies: {}",
-                diverging.join(", ")
-            );
-        }
-        merge_backup(&backup, skills_dir).context("Failed to copy local skills into the clone")
-    });
-    if let Err(e) = merged {
+    let give_up = |e: anyhow::Error| {
         log::warn!("git clone: not keeping the clone: {e:#}");
-        return put_back_pre_clone_library(skills_dir, &backup, e);
+        put_back_pre_clone_library(skills_dir, &backup, e).map(|()| None)
+    };
+    let diverging = match diverging_entries(&backup, skills_dir) {
+        Ok(names) => names,
+        Err(e) => return give_up(e),
+    };
+    let shown: Vec<String> = diverging
+        .iter()
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    let mut confirmed = set_aside.to_vec();
+    confirmed.sort();
+    let mut listed = shown.clone();
+    listed.sort();
+    if !diverging.is_empty() && listed != confirmed {
+        return give_up(anyhow::anyhow!(
+            "CLONE_LOCAL_DIFFERS: the clone was stopped and the local library left as it was, \
+             because these local items differ from the remote backup's copies:\n{}",
+            shown.join("\n")
+        ));
     }
-    // Every local entry is now either in the clone or identical to the
-    // clone's copy, so the backup holds nothing else.
+    if let Err(e) = merge_backup(&backup, skills_dir) {
+        return give_up(e.context("Failed to copy local skills into the clone"));
+    }
+    // Last, so nothing that can fail comes after it.
+    let local_copies = if diverging.is_empty() {
+        None
+    } else {
+        match set_aside_local_versions(&backup, &diverging, skills_dir) {
+            Ok(dir) => Some(dir),
+            Err(e) => return give_up(e),
+        }
+    };
+    // Every local entry is now in the clone, identical to the clone's copy,
+    // or set aside, so the backup holds nothing else.
     if let Err(e) = std::fs::remove_dir_all(&backup) {
         log::warn!("git clone: could not remove backup {}: {e}", backup.display());
     }
     log::info!("git clone: done");
-    Ok(())
+    Ok(local_copies)
+}
+
+/// Copy the local versions of `names` out of `backup` into a new folder beside
+/// the library, before the clone's copies replace them. A partial copy is
+/// removed again (the originals are still in `backup`), or reported if it
+/// cannot be.
+fn set_aside_local_versions(
+    backup: &Path,
+    names: &[std::ffi::OsString],
+    skills_dir: &Path,
+) -> Result<PathBuf> {
+    let dir = unused_sibling(skills_dir, "skills-local-copies");
+    std::fs::create_dir(&dir)
+        .with_context(|| format!("Failed to create {}", dir.display()))?;
+    let copied = names
+        .iter()
+        .try_for_each(|name| copy_entry(&backup.join(name), &dir.join(name)));
+    if let Err(e) = copied {
+        let e = anyhow::Error::new(e).context("Failed to set aside the local versions of differing skills");
+        return Err(match std::fs::remove_dir_all(&dir) {
+            Ok(()) => e,
+            Err(_) => e.context(format!("a partial copy is kept at {}", dir.display())),
+        });
+    }
+    log::info!("git clone: set aside {} local version(s) at {}", names.len(), dir.display());
+    Ok(dir)
 }
 
 /// The pre-clone library could not be moved back into place and is still at
@@ -1212,7 +1279,7 @@ fn unused_sibling(skills_dir: &Path, prefix: &str) -> PathBuf {
 /// anything [`replaceable_content`] counts. The repository itself and app
 /// metadata (`.skills-manager/`, the root `.gitignore`) are the clone's to
 /// keep, as before.
-fn diverging_entries(backup: &Path, clone: &Path) -> Result<Vec<String>> {
+fn diverging_entries(backup: &Path, clone: &Path) -> Result<Vec<std::ffi::OsString>> {
     let mut diverging = Vec::new();
     for entry in std::fs::read_dir(backup)? {
         let entry = entry?;
@@ -1230,7 +1297,7 @@ fn diverging_entries(backup: &Path, clone: &Path) -> Result<Vec<String>> {
             continue;
         }
         if replaceable_content(&entry.path())? != replaceable_content(&theirs)? {
-            diverging.push(shown.into_owned());
+            diverging.push(name);
         }
     }
     diverging.sort();
@@ -1842,7 +1909,8 @@ fn merge_backup(backup: &Path, target: &Path) -> Result<()> {
 }
 
 /// Copy a file, a directory tree, or a symlink as a symlink — links are never
-/// followed, and never dropped: the backup is deleted after a merge.
+/// followed, and never dropped: the backup is deleted after a merge. FIFOs,
+/// sockets and devices are skipped: they hold no file content.
 fn copy_entry(src: &Path, dst: &Path) -> std::io::Result<()> {
     let file_type = std::fs::symlink_metadata(src)?.file_type();
     if file_type.is_symlink() {
@@ -1866,6 +1934,11 @@ fn copy_entry(src: &Path, dst: &Path) -> std::io::Result<()> {
             let entry = entry?;
             copy_entry(&entry.path(), &dst.join(entry.file_name()))?;
         }
+        return Ok(());
+    }
+    // FIFOs, sockets and devices hold no content (`replaceable_content` skips
+    // them too), and opening a FIFO to copy it would block for good.
+    if !file_type.is_file() {
         return Ok(());
     }
     std::fs::copy(src, dst).map(|_| ())
@@ -2301,7 +2374,7 @@ mod tests {
         let bogus_src = tmp.path().join("does-not-exist.git");
         let url = format!("file://{}", bogus_src.display());
 
-        let err = clone_into_unlocked(&target, &url).unwrap_err();
+        let err = clone_into_unlocked(&target, &url, &[]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("git clone failed"),
@@ -2321,7 +2394,7 @@ mod tests {
         // echoes the URL back; the error must not leak the token.
         let url = "https://ghp_supersecrettoken123@127.0.0.1:1/does-not-exist.git";
 
-        let err = clone_into_unlocked(&target, url).unwrap_err();
+        let err = clone_into_unlocked(&target, url, &[]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             !msg.contains("ghp_supersecrettoken123"),
@@ -2858,7 +2931,7 @@ mod tests {
         write_file(&skills.join("identical-skill/SKILL.md"), "same\n");
         write_file(&skills.join("local-only-skill/SKILL.md"), "mine\n");
 
-        let err = clone_into_unlocked(&skills, remote.to_str().unwrap()).unwrap_err();
+        let err = clone_into_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("CLONE_LOCAL_DIFFERS"), "unrecognizable error: {msg}");
         assert!(msg.contains("edited-skill"), "diverging skill not named: {msg}");
@@ -2898,7 +2971,7 @@ mod tests {
         write_file(&skills.join(".skills-manager/protocol.json"), "{\"from\":\"local\"}\n");
         write_file(&skills.join(".gitignore"), "local-only-rule/\n");
 
-        clone_into_unlocked(&skills, remote.to_str().unwrap()).unwrap();
+        clone_into_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap();
 
         assert!(skills.join(".git").exists());
         assert_eq!(read_normalized(&skills.join("identical-skill/SKILL.md")), "same\n");
@@ -2930,7 +3003,7 @@ mod tests {
             return; // running as root: nothing is unreadable, the failure can't be staged
         }
 
-        let result = clone_into_unlocked(&skills, remote.to_str().unwrap());
+        let result = clone_into_unlocked(&skills, remote.to_str().unwrap(), &[]);
         let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644));
 
         assert!(result.is_err(), "a failed merge must fail the clone");
@@ -2967,7 +3040,7 @@ mod tests {
         write_file(&skills.join("plain-skill/.DS_Store"), "x");
         std::fs::create_dir_all(skills.join("plain-skill/empty")).unwrap();
 
-        let err = clone_into_unlocked(&skills, remote.to_str().unwrap()).unwrap_err();
+        let err = clone_into_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap_err();
         let msg = format!("{err:#}");
         for name in ["linked-skill", "ignore-skill", "nested-repo-skill"] {
             assert!(msg.contains(name), "{name} not reported: {msg}");
@@ -2989,7 +3062,7 @@ mod tests {
         write_file(&skills.join("local-only-skill/SKILL.md"), "mine\n");
         std::os::unix::fs::symlink("SKILL.md", skills.join("local-only-skill/AGENTS.md")).unwrap();
 
-        clone_into_unlocked(&skills, remote.to_str().unwrap()).unwrap();
+        clone_into_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap();
 
         assert_eq!(
             std::fs::read_link(skills.join("local-only-skill/AGENTS.md")).unwrap(),
@@ -3010,7 +3083,7 @@ mod tests {
         let skills = tmp.path().join("skills");
         write_file(&skills.join("notes"), "local notes\n");
 
-        let result = clone_into_unlocked(&skills, remote.to_str().unwrap());
+        let result = clone_into_unlocked(&skills, remote.to_str().unwrap(), &[]);
 
         assert!(!tmp.path().join("outside.txt").exists(), "wrote outside the library");
         let err = result.unwrap_err();
@@ -3032,7 +3105,7 @@ mod tests {
         let skills = tmp.path().join("skills");
         write_file(&skills.join(".DS_Store"), "finder\n");
 
-        clone_into_unlocked(&skills, remote.to_str().unwrap()).unwrap();
+        clone_into_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap();
 
         assert!(!tmp.path().join("outside.txt").exists(), "wrote outside the library");
     }
@@ -3067,6 +3140,114 @@ mod tests {
     }
 
     #[test]
+    fn clone_can_set_aside_local_versions_and_continue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (remote, _) = seeded_remote(
+            tmp.path(),
+            &[("edited-skill/SKILL.md", "remote version\n"), ("identical-skill/SKILL.md", "same\n")],
+        );
+        let skills = tmp.path().join("skills");
+        write_file(&skills.join("edited-skill/SKILL.md"), "local edit\n");
+        write_file(&skills.join("edited-skill/notes.md"), "only here\n");
+        write_file(&skills.join("identical-skill/SKILL.md"), "same\n");
+        write_file(&skills.join("local-only-skill/SKILL.md"), "mine\n");
+
+        let copies = clone_into_unlocked(&skills, remote.to_str().unwrap(), &["edited-skill".to_string()])
+            .unwrap()
+            .expect("the folder holding the local versions");
+
+        // The library takes the remote's version and keeps local-only skills.
+        assert!(skills.join(".git").exists());
+        assert_eq!(read_normalized(&skills.join("edited-skill/SKILL.md")), "remote version\n");
+        assert!(!skills.join("edited-skill/notes.md").exists());
+        assert_eq!(read_normalized(&skills.join("local-only-skill/SKILL.md")), "mine\n");
+        // The local version, whole, beside the library rather than in it.
+        assert_eq!(copies.parent(), skills.parent());
+        assert_eq!(read_normalized(&copies.join("edited-skill/SKILL.md")), "local edit\n");
+        assert_eq!(read_normalized(&copies.join("edited-skill/notes.md")), "only here\n");
+        assert!(!copies.join("identical-skill").exists(), "only differing skills are set aside");
+        assert!(!copies.join("local-only-skill").exists(), "only differing skills are set aside");
+        assert!(siblings_named(&skills, "skills-backup-before-clone").is_empty());
+    }
+
+    /// Setting aside is consent for the list the user saw: anything else
+    /// differing by the time the clone runs stops it again.
+    #[test]
+    fn clone_sets_aside_only_the_confirmed_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (remote, _) = seeded_remote(
+            tmp.path(),
+            &[("edited-skill/SKILL.md", "remote version\n"), ("other-skill/SKILL.md", "remote\n")],
+        );
+        let skills = tmp.path().join("skills");
+        write_file(&skills.join("edited-skill/SKILL.md"), "local edit\n");
+        write_file(&skills.join("other-skill/SKILL.md"), "changed since\n");
+
+        let err = clone_into_unlocked(&skills, remote.to_str().unwrap(), &["edited-skill".to_string()])
+            .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("CLONE_LOCAL_DIFFERS"), "unexpected error: {msg}");
+        assert!(msg.contains("\nedited-skill\nother-skill"), "the new list, one per line: {msg}");
+        assert_eq!(read_normalized(&skills.join("other-skill/SKILL.md")), "changed since\n");
+        assert!(!skills.join(".git").exists());
+        assert!(siblings_named(&skills, "skills-local-copies").is_empty());
+    }
+
+    #[test]
+    fn reclone_can_set_aside_local_versions_and_continue() {
+        // The sync-conflict path again, this time choosing to continue.
+        let tmp = tempfile::tempdir().unwrap();
+        let (remote, seed) =
+            seeded_remote(tmp.path(), &[("conflict-skill/SKILL.md", "base\n")]);
+        let skills = tmp.path().join("skills");
+        git_ok(tmp.path(), &["clone", remote.to_str().unwrap(), skills.to_str().unwrap()]);
+        write_file(&seed.join("conflict-skill/SKILL.md"), "edited on the other machine\n");
+        git_ok(&seed, &["commit", "-am", "other machine"]);
+        git_ok(&seed, &["push", "origin", "main"]);
+        write_file(&skills.join("conflict-skill/SKILL.md"), "edited here\n");
+        git_ok(&skills, &["commit", "-am", "local"]);
+
+        let outcome = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap(), &["conflict-skill".to_string()]).unwrap();
+
+        let copies = outcome.local_copies.expect("the folder holding the local versions");
+        assert_eq!(read_normalized(&copies.join("conflict-skill/SKILL.md")), "edited here\n");
+        assert_eq!(
+            read_normalized(&skills.join("conflict-skill/SKILL.md")),
+            "edited on the other machine\n"
+        );
+        // The local commit was never pushed, so its history is kept too.
+        assert!(outcome.kept_git.is_some());
+    }
+
+    /// Opening a FIFO for reading blocks until something writes to it, so a
+    /// plain copy of one would hang the clone for good.
+    #[cfg(unix)]
+    #[test]
+    fn clone_skips_special_files_instead_of_hanging_on_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (remote, _) = seeded_remote(tmp.path(), &[("remote-skill/SKILL.md", "theirs\n")]);
+        let skills = tmp.path().join("skills");
+        write_file(&skills.join("local-only-skill/SKILL.md"), "mine\n");
+        let fifo = skills.join("local-only-skill/pipe");
+        if !Command::new("mkfifo").arg(&fifo).status().is_ok_and(|s| s.success()) {
+            return; // no mkfifo here
+        }
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let (dir, url) = (skills.clone(), remote.to_str().unwrap().to_string());
+        std::thread::spawn(move || {
+            let _ = done.send(clone_into_unlocked(&dir, &url, &[]).is_ok());
+        });
+        let result = finished.recv_timeout(std::time::Duration::from_secs(20));
+
+        assert_eq!(result, Ok(true), "the clone hung or failed on a FIFO");
+        assert_eq!(read_normalized(&skills.join("local-only-skill/SKILL.md")), "mine\n");
+        // No file content to keep: skipped, like an empty directory.
+        assert!(std::fs::symlink_metadata(&fifo).is_err());
+    }
+
+    #[test]
     fn a_failed_clone_restores_the_library_and_spares_earlier_backups() {
         let tmp = tempfile::tempdir().unwrap();
         let skills = tmp.path().join("skills");
@@ -3074,7 +3255,7 @@ mod tests {
         let earlier = occupy_recovery_names(&skills, "skills-backup-before-clone");
         let bogus = tmp.path().join("does-not-exist.git");
 
-        assert!(clone_into_unlocked(&skills, bogus.to_str().unwrap()).is_err());
+        assert!(clone_into_unlocked(&skills, bogus.to_str().unwrap(), &[]).is_err());
 
         assert_eq!(read_normalized(&skills.join("local-skill/SKILL.md")), "mine\n");
         assert!(!skills.join(".git").exists());
@@ -3108,7 +3289,7 @@ mod tests {
         git_ok(&skills, &["commit", "-am", "local"]);
         let head_before = git_ok(&skills, &["rev-parse", "HEAD"]);
 
-        let err = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap()).unwrap_err();
+        let err = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("CLONE_LOCAL_DIFFERS"), "unrecognizable error: {msg}");
         assert!(msg.contains("conflict-skill"), "diverging skill not named: {msg}");
@@ -3133,7 +3314,7 @@ mod tests {
         git_ok(&skills, &["tag", "sm-v-local"]);
         let local_head = git_ok(&skills, &["rev-parse", "HEAD"]);
 
-        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap()).unwrap();
+        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap().kept_git;
 
         let kept = siblings_named(&skills, "skills-git-recovery");
         assert_eq!(kept.len(), 1, "old history must be kept: {kept:?}");
@@ -3154,7 +3335,7 @@ mod tests {
         // A local-only pin ref (never pushed by design) on a pushed commit.
         git_ok(&skills, &["update-ref", "refs/skills-manager/pin", "HEAD"]);
 
-        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap()).unwrap();
+        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap().kept_git;
 
         assert_eq!(reported, None);
         assert!(skills.join(".git").exists());
@@ -3170,7 +3351,7 @@ mod tests {
         // A snapshot tag whose push failed, on a commit the remote has.
         git_ok(&skills, &["tag", "sm-v-unpushed"]);
 
-        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap()).unwrap();
+        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap().kept_git;
 
         let kept = reported.expect("an unpushed tag is history the remote lacks");
         let git_dir = format!("--git-dir={}", kept.display());
@@ -3191,7 +3372,7 @@ mod tests {
         git_ok(&skills, &["commit", "-m", "on detached HEAD"]);
         let detached = git_ok(&skills, &["rev-parse", "HEAD"]);
 
-        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap()).unwrap();
+        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap().kept_git;
 
         let kept = reported.expect("a detached commit is history the remote lacks");
         let git_dir = format!("--git-dir={}", kept.display());
@@ -3211,7 +3392,7 @@ mod tests {
         git_ok(&worktree, &["add", "-A"]);
         git_ok(&worktree, &["commit", "-m", "in the worktree"]);
 
-        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap()).unwrap();
+        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap().kept_git;
 
         assert!(reported.is_some(), "a worktree's commit is history the remote lacks");
     }
@@ -3225,7 +3406,7 @@ mod tests {
         git_ok(tmp.path(), &["clone", remote.to_str().unwrap(), skills.to_str().unwrap()]);
         write_file(&skills.join(".git/modules/vendored/HEAD"), "0123456789012345678901234567890123456789\n");
 
-        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap()).unwrap();
+        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap().kept_git;
 
         assert!(reported.is_some(), "history under .git/modules is not proven to be on the remote");
     }
@@ -3245,7 +3426,7 @@ mod tests {
             return; // running as root: nothing is unreadable
         }
 
-        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap()).unwrap();
+        let reported = reclone_from_remote_unlocked(&skills, remote.to_str().unwrap(), &[]).unwrap().kept_git;
 
         if let Some(kept) = &reported {
             let _ = std::fs::set_permissions(kept.join("worktrees"), std::fs::Permissions::from_mode(0o755));
@@ -3263,7 +3444,7 @@ mod tests {
         let earlier = occupy_recovery_names(&skills, "skills-git-recovery");
         let bogus = tmp.path().join("does-not-exist.git");
 
-        assert!(reclone_from_remote_unlocked(&skills, bogus.to_str().unwrap()).is_err());
+        assert!(reclone_from_remote_unlocked(&skills, bogus.to_str().unwrap(), &[]).is_err());
 
         assert_eq!(git_ok(&skills, &["rev-parse", "HEAD"]), head_before);
         assert_eq!(read_normalized(&skills.join("remote-skill/SKILL.md")), "theirs\n");
