@@ -9,6 +9,18 @@ export function mapGitErrorMessage(error: unknown, t: TFunction): string {
   const kind = getErrorKind(error);
   const message = getErrorMessage(error, "");
 
+  // A clone or re-clone that left the user's files (or old history) beside
+  // the library says where; no category message may hide that, network
+  // included.
+  if (message.includes("kept at")) {
+    return `${t("settings.gitErrorGeneric")} (${message.trim()})`;
+  }
+  // Before the phrase checks below: the skill names it lists could match them.
+  const differs = /CLONE_LOCAL_DIFFERS: .*?copies: (.+)$/s.exec(message);
+  if (differs) {
+    return t("settings.gitErrorCloneLocalDiffers", { names: differs[1] });
+  }
+
   if (kind === "network") return t("settings.gitErrorNetwork");
   if (
     message.includes("Authentication failed")

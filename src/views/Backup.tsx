@@ -389,7 +389,8 @@ export function Backup() {
       toast.success(t("settings.gitCloneSuccess"));
       await Promise.all([refreshGitStatus(true), refreshManagedSkills(), refreshPresets(), refreshVersions()]);
     } catch (error) {
-      toast.error(mapGitError(error));
+      // Long enough to read the skill names a stopped clone lists.
+      toast.error(mapGitError(error), { duration: 12000 });
       throw error;
     } finally {
       setLoading(null);
@@ -420,11 +421,15 @@ export function Backup() {
     }
     setLoading("recovery");
     try {
-      await api.gitBackupReclone(remoteConfig);
-      toast.success(t("settings.gitRecoveryRecloneSuccess"));
+      const keptHistory = await api.gitBackupReclone(remoteConfig);
+      if (keptHistory) {
+        toast.success(t("settings.gitRecoveryRecloneKeptHistory", { path: keptHistory }), { duration: 20000 });
+      } else {
+        toast.success(t("settings.gitRecoveryRecloneSuccess"));
+      }
       await Promise.all([refreshGitStatus(true), refreshManagedSkills(), refreshPresets(), refreshVersions()]);
     } catch (error) {
-      toast.error(mapGitError(error));
+      toast.error(mapGitError(error), { duration: 12000 });
       throw error;
     } finally {
       setLoading(null);

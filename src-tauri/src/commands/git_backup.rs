@@ -597,14 +597,15 @@ pub async fn git_backup_clone(
     .await?
 }
 
-/// Recovery: discard the local `.git` and re-clone from the configured remote.
-/// Existing skill files are preserved via the same backup-then-merge flow
-/// used by the regular clone path.
+/// Recovery: set the local `.git` aside and re-clone from the configured
+/// remote. Existing skill files go through the same backup-then-merge flow as
+/// the regular clone path. Returns where the previous `.git` was kept when its
+/// history could not be proven to be on the remote.
 #[tauri::command]
 pub async fn git_backup_reclone(
     store: State<'_, Arc<SkillStore>>,
     url: String,
-) -> Result<(), AppError> {
+) -> Result<Option<String>, AppError> {
     git_fetcher::validate_git_url(&url).map_err(AppError::git)?;
     let store = store.inner().clone();
     sync_engine_pref(&store);
@@ -612,9 +613,19 @@ pub async fn git_backup_reclone(
     tokio::task::spawn_blocking(move || {
         let effective = sanitize_url_to_keychain(url.trim());
         git_backup::with_repo_lock("git reclone", || {
-            git_backup::reclone_from_remote_unlocked(&skills_dir, &effective)?;
+            let kept = git_backup::reclone_from_remote_unlocked(&skills_dir, &effective)?;
             apply_device_identity(&store, &skills_dir);
-            reconcile_skills_index_unlocked(&store)
+            if let Err(e) = reconcile_skills_index_unlocked(&store) {
+                // Don't let the error swallow where the old history went.
+                return Err(match &kept {
+                    Some(path) => e.context(format!(
+                        "re-cloned, and the previous .git history is kept at {}",
+                        path.display()
+                    )),
+                    None => e,
+                });
+            }
+            Ok(kept.map(|path| path.display().to_string()))
         })
         .map_err(classify_git_chain)
     })
